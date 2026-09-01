@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/kvs-engine", "crates/kvs-server"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = { version = "2", features = ["serde"] }
+crc32fast = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+

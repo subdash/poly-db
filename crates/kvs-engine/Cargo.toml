@@ -1,0 +1,15 @@
+[package]
+name = "kvs-engine"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+bincode = { workspace = true }
+crc32fast = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
