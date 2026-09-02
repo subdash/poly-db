@@ -28,6 +28,42 @@
 - Every task: write the test, watch it fail, implement, watch it pass, then `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test` before committing.
 - Commit at the end of every task. Small commits are the point.
 
+## The red phase, concretely
+
+Every task below says "run the test and watch it fail". In a statically typed
+language that happens in two steps, and only the second one is worth much.
+
+**Step one: the test does not compile.** `cannot find type Engine in this
+scope` is the expected first failure, and it is what the "Expected: FAIL"
+lines in this plan describe. Its value is real but narrow — writing the test
+first forces you to design the API from the caller's side before you commit to
+an implementation. It says nothing about whether the assertion works.
+
+**Step two: stub the signatures, then run.** Write each function from the
+task's **Interfaces** block with a `todo!()` body. `todo!()` has type `!`, the
+never type, which coerces to anything — so it typechecks as the body of any
+signature regardless of return type:
+
+```rust
+pub fn open(dir: impl AsRef<Path>) -> Result<Engine> { todo!() }
+pub fn get(&self, key: &str) -> Result<String> { todo!() }
+```
+
+Now the test compiles and panics with `not yet implemented` at a line number.
+That is a red the test actually reached.
+
+**The stronger version, on tasks where the assertion is doing subtle work.**
+Instead of `todo!()`, return a plausible *wrong* value — `Ok(String::new())`
+for a getter, `Ok(())` for a setter. The test then fails on the assertion
+itself (`left: "", right: "one"`), which proves the assertion can tell a right
+answer from a wrong one. This is the guard against a test that passes
+vacuously: an assertion that can never fail compiles fine and goes green the
+moment the API exists, and you will never find out.
+
+`todo!()` is the right default. Fake a wrong value on Task 7 (the log-length
+assertion) and Task 11 (the monotonicity assertion), where a vacuous test would
+quietly delete a real guarantee.
+
 ## File Structure
 
 ```
