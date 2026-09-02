@@ -297,9 +297,16 @@ enum EngineError {
     KeyNotFound,
     KeyTooLarge { len: usize },
     ValueTooLarge { len: usize },
+    Encode(String),
     ShuttingDown,
 }
 ```
+
+`Encode` carries the message rather than `#[from] bincode::error::EncodeError`
+on purpose: the payload encoding is meant to be replaceable, so bincode's types
+must not appear in the engine's public error surface. Only a *decode* failure
+means corruption; an encode failure is a defect in this process, with nothing
+wrong on disk and no offset to report.
 
 No `anyhow` in the library — erasing the error type would make the status-code
 mapping guesswork.
@@ -307,8 +314,8 @@ mapping guesswork.
 `kvs-server` defines an `AppError` implementing `axum::response::IntoResponse`.
 That impl is the single place where an engine error becomes a status code:
 `KeyNotFound` → `404`, `KeyTooLarge`/`ValueTooLarge` → `413`, malformed JSON →
-`400`, `ShuttingDown` or a closed channel → `503`, `Io`/`Corrupt` → `500` with
-the detail logged rather than returned. `anyhow` is acceptable in the binary,
+`400`, `ShuttingDown` or a closed channel → `503`, `Io`/`Corrupt`/`Encode` → `500`
+with the detail logged rather than returned. `anyhow` is acceptable in the binary,
 where errors are reported rather than matched on.
 
 ## 8. Testing

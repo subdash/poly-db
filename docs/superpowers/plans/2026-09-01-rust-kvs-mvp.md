@@ -324,11 +324,17 @@ pub enum EngineError {
     KeyNotFound,
     KeyTooLarge { len: usize },
     ValueTooLarge { len: usize },
+    Encode(String),          // #[error("failed to encode a record: {0}")]
     ShuttingDown,
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
 ```
+
+`Encode` holds the message as a `String`, not `#[from] bincode::error::EncodeError`.
+Putting bincode's type in the enum would make the payload encoding part of the
+engine's public API, and the whole point of the header/payload split is that the
+encoding stays swappable.
 
 Use `thiserror::Error` with `#[error("...")]` on each variant; the two messages
 the test pins are `"corrupt record at offset {offset}"` and `"key not found"`.
@@ -472,8 +478,10 @@ For the payload encoding, `bincode` 2's serde bridge:
 — the decode returns `(value, bytes_read)`, so destructure it. Check the exact
 names on docs.rs when you add the dependency; if the 2.x API has moved, pinning
 `bincode = "1.3"` and using `bincode::serialize` / `bincode::deserialize` is a
-fine fallback and changes nothing else in this plan. A `bincode` error maps to
-`Corrupt { offset }`, not to `Io`.
+fine fallback and changes nothing else in this plan. A bincode *decode* error maps to
+`Corrupt { offset }` — bytes from the log that will not decode are corruption.
+An *encode* error maps to `EngineError::Encode(e.to_string())`: nothing on disk
+is damaged and there is no offset to report.
 
 Then wire it up in `lib.rs`:
 ```rust
@@ -1890,7 +1898,7 @@ of bug that is invisible until a client depends on it.
 | `KeyNotFound` | 404 | `not_found` |
 | `KeyTooLarge` / `ValueTooLarge` | 413 | `payload_too_large` |
 | `ShuttingDown` | 503 | `unavailable` |
-| `Io` / `Corrupt` | 500 | `internal` |
+| `Io` / `Corrupt` / `Encode` | 500 | `internal` |
 
 `Io` and `Corrupt` carry operational detail — file paths, byte offsets — so log
 them with `tracing::error!` and return a generic message. A 500 body is for the
