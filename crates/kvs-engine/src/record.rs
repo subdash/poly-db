@@ -1,5 +1,9 @@
 use crate::{Command, EngineError, Result};
 
+pub const MAX_KEY_BYTES: usize = 1_024; // 1 KiB
+pub const MAX_VALUE_BYTES: usize = 1_048_576; // 1 MiB
+// Add 64 bytes of wiggle room
+pub(crate) const MAX_PAYLOAD_BYTES: usize = MAX_KEY_BYTES + MAX_VALUE_BYTES + 64;
 pub(crate) const HEADER_LEN: usize = size_of::<u32>() * 2;
 
 pub(crate) fn encode(cmd: &Command) -> Result<Vec<u8>> {
@@ -56,7 +60,7 @@ fn stored_crc(header: &[u8; HEADER_LEN]) -> u32 {
     )
 }
 
-fn payload_len(header: &[u8; HEADER_LEN]) -> u32 {
+pub(crate) fn payload_len(header: &[u8; HEADER_LEN]) -> u32 {
     u32::from_le_bytes(
         header[4..8]
             .try_into()

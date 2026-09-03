@@ -713,6 +713,20 @@ the keydir first, append the tombstone second.
     }
 
     #[test]
+    fn an_accepted_remove_appends_a_tombstone() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open(dir.path()).expect("open");
+        let log = dir.path().join("0.log");
+
+        engine.set("alpha".into(), "one".into()).expect("set");
+        let before = std::fs::metadata(&log).expect("metadata").len();
+        engine.remove("alpha").expect("remove");
+        let after = std::fs::metadata(&log).expect("metadata").len();
+
+        assert!(after > before, "an accepted remove must append a tombstone");
+    }
+
+    #[test]
     fn a_key_can_be_set_again_after_removal() {
         let (_dir, mut engine) = open_temp();
         engine.set("alpha".into(), "one".into()).expect("set");
@@ -744,7 +758,7 @@ keydir — same order as `set`: bytes durable first, index second.
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `cargo test -p kvs-engine engine`
-Expected: PASS, 12 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -855,7 +869,7 @@ that with truncation — the tests there will tell you when you have it right.
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `cargo test -p kvs-engine`
-Expected: PASS — 21 tests in the lib target, 3 in the `recovery` target. Cargo
+Expected: PASS — 22 tests in the lib target, 3 in the `recovery` target. Cargo
 reports each test binary separately; there is no combined total.
 
 - [ ] **Step 5: Commit**
@@ -991,7 +1005,7 @@ the right thing to do.
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `cargo test -p kvs-engine`
-Expected: PASS — 21 in the lib target, 5 in `recovery`.
+Expected: PASS — 22 in the lib target, 5 in `recovery`.
 
 - [ ] **Step 5: Commit**
 
@@ -1127,7 +1141,7 @@ pub use engine::{Engine, FsyncPolicy, MAX_KEY_BYTES, MAX_VALUE_BYTES};
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `cargo test -p kvs-engine`
-Expected: PASS — 28 in the lib target, 5 in `recovery`.
+Expected: PASS — 29 in the lib target, 5 in `recovery`.
 
 - [ ] **Step 5: Commit**
 
@@ -1294,7 +1308,7 @@ is worse than aborting. Task 13 maps that to a 500 at the HTTP boundary.
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `cargo test -p kvs-engine`
-Expected: PASS — 33 in the lib target, 5 in `recovery`. Every Phase 1 test must
+Expected: PASS — 34 in the lib target, 5 in `recovery`. Every Phase 1 test must
 still pass **unmodified**; that is what tells you the refactor preserved
 behaviour.
 
@@ -2405,7 +2419,7 @@ git commit -m "feat(server): wire up main and add an end-to-end socket test"
 
 **The MVP is complete.** `cargo test --workspace` should report 33 tests in the
 engine's lib target, 5 in `recovery`, and 4 + 3 + 16 + 1 across the server's
-`writer`, `concurrency`, `api`, and `smoke` targets — 62 in all.
+`writer`, `concurrency`, `api`, and `smoke` targets — 63 in all.
 
 ---
 

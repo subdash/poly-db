@@ -1,16 +1,15 @@
 use crate::{
     Command, EngineError, Result,
     keydir::{Entry, KeyDir},
-    record::{self, HEADER_LEN},
+    record::{self, HEADER_LEN, MAX_KEY_BYTES, MAX_PAYLOAD_BYTES, MAX_VALUE_BYTES},
 };
-use std::os::unix::fs::FileExt;
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{BufWriter, Write},
+    io::{BufReader, BufWriter, ErrorKind, Read, Write},
+    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub struct Engine {
@@ -35,20 +34,102 @@ impl Engine {
             .append(true)
             .create(true)
             .open(&log_path)?;
+
         let read_handle = Arc::new(File::open(&log_path)?);
-        let offset = read_handle.metadata()?.len();
+        // Replay takes an `impl Read`, which Arc<File> does not implement, so we must dereference
+        // the pointer and pass a reference to the file handle it points to.
+        let (key_dir, offset) = Engine::replay(&*read_handle)?;
+
+        // In the case of a corrupted log, the loop will exit early and the log will be
+        // truncated to the end of the last uncorrupted entry.
+        let unprocessed_bytes = file.metadata()?.len() - offset;
+        if unprocessed_bytes > 0 {
+            file.set_len(offset)?;
+            eprintln!(
+                "{unprocessed_bytes} bytes after byte {offset} were corrupted and truncated from the log."
+            );
+        }
+
         let writer = BufWriter::new(file);
 
-        Ok(Engine {
+        let engine = Engine {
             data_directory_path: dir.to_path_buf(),
             appender: writer,
             write_offset: offset,
             read_handle,
-            key_dir: HashMap::new(),
-        })
+            key_dir,
+        };
+
+        Ok(engine)
+    }
+
+    fn replay(reader: impl Read) -> Result<(KeyDir, u64)> {
+        let mut key_dir = HashMap::new();
+        let mut reader = BufReader::new(reader);
+        let mut offset = 0;
+
+        loop {
+            // Read header
+            let mut header = [0u8; HEADER_LEN];
+
+            match reader.read_exact(&mut header) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+
+            // Read payload
+            let payload_len = record::payload_len(&header);
+
+            if payload_len as usize > MAX_PAYLOAD_BYTES {
+                // Don't allocate more than the max allowed
+                break;
+            }
+
+            let mut full_record = vec![0u8; HEADER_LEN + payload_len as usize];
+            full_record[0..HEADER_LEN].copy_from_slice(&header);
+
+            match reader.read_exact(&mut full_record[HEADER_LEN..]) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+
+            // Decode
+            let Ok(cmd) = record::decode(&full_record, offset) else {
+                break;
+            };
+
+            match cmd {
+                Command::Set { key, .. } => {
+                    let entry = Entry {
+                        pos: offset,
+                        file_id: 0,
+                        len: payload_len,
+                    };
+                    key_dir.insert(key, entry);
+                }
+
+                Command::Remove { key } => {
+                    key_dir.remove(&key);
+                }
+            };
+
+            offset += HEADER_LEN as u64 + payload_len as u64;
+        }
+
+        Ok((key_dir, offset))
     }
 
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
+        if key.len() > MAX_KEY_BYTES {
+            return Err(EngineError::KeyTooLarge { len: key.len() });
+        }
+
+        if value.len() > MAX_VALUE_BYTES {
+            return Err(EngineError::ValueTooLarge { len: value.len() });
+        }
+
         // Encode
         let cmd = Command::Set {
             key: key.clone(),
@@ -62,10 +143,6 @@ impl Engine {
         let entry = Entry {
             pos,
             file_id: 0,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or_default(),
             len,
         };
         self.key_dir.insert(key, entry);
@@ -88,6 +165,10 @@ impl Engine {
     }
 
     pub fn remove(&mut self, key: &str) -> Result<()> {
+        if key.len() > MAX_KEY_BYTES {
+            return Err(EngineError::KeyTooLarge { len: key.len() });
+        }
+
         // Check for membership in key dir
         if !self.key_dir.contains_key(key) {
             return Err(EngineError::KeyNotFound);
@@ -282,5 +363,74 @@ mod tests {
             after > before,
             "an accepted remove must append a tombstone to the log"
         );
+    }
+
+    #[test]
+    fn remove_rejects_an_oversized_key() {
+        let (_dir, mut engine) = open_temp();
+        let key = "k".repeat(MAX_KEY_BYTES + 1);
+        let err = engine
+            .remove(&key)
+            .expect_err("an oversized key must be rejected");
+        assert!(matches!(err, EngineError::KeyTooLarge { .. }));
+    }
+
+    #[test]
+    fn set_rejects_an_oversized_key() {
+        let (_dir, mut engine) = open_temp();
+        let key = "k".repeat(MAX_KEY_BYTES + 1);
+        let err = engine
+            .set(key, "one".into())
+            .expect_err("an oversized key must be rejected");
+        assert!(matches!(err, EngineError::KeyTooLarge { .. }));
+    }
+
+    #[test]
+    fn set_rejects_an_oversized_value() {
+        let (_dir, mut engine) = open_temp();
+        let value = "v".repeat(MAX_VALUE_BYTES + 1);
+        let err = engine
+            .set("alpha".into(), value)
+            .expect_err("an oversized value must be rejected");
+        assert!(matches!(err, EngineError::ValueTooLarge { .. }));
+    }
+
+    #[test]
+    fn a_key_exactly_at_the_limit_is_accepted() {
+        let (_dir, mut engine) = open_temp();
+        let key = "k".repeat(MAX_KEY_BYTES);
+        engine
+            .set(key.clone(), "one".into())
+            .expect("a key at the limit is legal");
+        assert_eq!(engine.get(&key).expect("get"), "one");
+    }
+
+    #[test]
+    fn limits_are_measured_in_bytes_not_characters() {
+        let (_dir, mut engine) = open_temp();
+        // 'é' is two bytes in UTF-8, so this is over the limit despite being
+        // MAX_KEY_BYTES characters long.
+        let key = "é".repeat(MAX_KEY_BYTES);
+        let err = engine
+            .set(key, "one".into())
+            .expect_err("byte length is what counts");
+        assert!(matches!(err, EngineError::KeyTooLarge { .. }));
+    }
+
+    #[test]
+    fn a_rejected_write_leaves_the_log_untouched() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open(dir.path()).expect("open");
+        let log = dir.path().join("0.log");
+
+        engine.set("alpha".into(), "one".into()).expect("set");
+        let before = std::fs::metadata(&log).expect("metadata").len();
+
+        engine
+            .set("k".repeat(MAX_KEY_BYTES + 1), "one".into())
+            .expect_err("must be rejected");
+        let after = std::fs::metadata(&log).expect("metadata").len();
+
+        assert_eq!(before, after, "validation must happen before the append");
     }
 }
