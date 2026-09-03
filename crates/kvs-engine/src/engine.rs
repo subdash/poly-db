@@ -54,18 +54,9 @@ impl Engine {
             key: key.clone(),
             value,
         };
-        let record = record::encode(&cmd)?;
-        let record_len = record.len();
 
-        // Calculate current write offset and payload length
-        let pos = self.write_offset;
-        let len = (record_len - HEADER_LEN) as u32;
-
-        // Append the bytes, flush (buffer -> OS) and fsync (OS -> disk), update offset
-        self.appender.write_all(&record)?;
-        self.appender.flush()?;
-        self.appender.get_ref().sync_data()?;
-        self.write_offset += record_len as u64;
+        // Append to log
+        let (pos, len) = self.append(&cmd)?;
 
         // Write to key dir
         let entry = Entry {
@@ -95,6 +86,39 @@ impl Engine {
             Command::Remove { .. } => Err(EngineError::Corrupt { offset: entry.pos }),
         }
     }
+
+    pub fn remove(&mut self, key: &str) -> Result<()> {
+        // Check for membership in key dir
+        if !self.key_dir.contains_key(key) {
+            return Err(EngineError::KeyNotFound);
+        }
+
+        let cmd = Command::Remove {
+            key: String::from(key),
+        };
+
+        self.append(&cmd)?;
+        self.key_dir.remove(key);
+
+        Ok(())
+    }
+
+    fn append(&mut self, cmd: &Command) -> Result<(u64, u32)> {
+        // Capture log position prior to appending
+        let pos = self.write_offset;
+
+        let record = record::encode(cmd)?;
+        let record_len = record.len();
+        let payload_len = (record_len - HEADER_LEN) as u32;
+
+        // Append the bytes, flush (buffer -> OS) and fsync (OS -> disk), update offset
+        self.appender.write_all(&record)?;
+        self.appender.flush()?;
+        self.appender.get_ref().sync_data()?;
+        self.write_offset += record_len as u64;
+
+        Ok((pos, payload_len))
+    }
 }
 
 #[cfg(test)]
@@ -109,6 +133,9 @@ mod tests {
         (dir, engine)
     }
 
+    //
+    // get/set
+    //
     #[test]
     fn get_returns_a_value_that_was_set() {
         let (_dir, mut engine) = open_temp();
@@ -177,6 +204,83 @@ mod tests {
         assert!(
             after_second > after_first,
             "an overwrite appends a new record rather than editing in place"
+        );
+    }
+
+    //
+    // remove
+    //
+    #[test]
+    fn remove_makes_a_key_unreadable() {
+        let (_dir, mut engine) = open_temp();
+        engine.set("alpha".into(), "one".into()).expect("set");
+        engine.remove("alpha").expect("remove");
+        let err = engine
+            .get("alpha")
+            .expect_err("a removed key must not resolve");
+        assert!(matches!(err, EngineError::KeyNotFound));
+    }
+
+    #[test]
+    fn remove_on_an_unknown_key_reports_key_not_found() {
+        let (_dir, mut engine) = open_temp();
+        let err = engine
+            .remove("ghost")
+            .expect_err("removing nothing must fail");
+        assert!(matches!(err, EngineError::KeyNotFound));
+    }
+
+    #[test]
+    fn a_rejected_remove_writes_nothing_to_the_log() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open(dir.path()).expect("open");
+        let log = dir.path().join("0.log");
+
+        engine.set("alpha".into(), "one".into()).expect("set");
+        let before = std::fs::metadata(&log).expect("metadata").len();
+        engine
+            .remove("ghost")
+            .expect_err("removing nothing must fail");
+        let after = std::fs::metadata(&log).expect("metadata").len();
+
+        assert_eq!(
+            before, after,
+            "a rejected remove must not append a tombstone"
+        );
+    }
+
+    #[test]
+    fn a_key_can_be_set_again_after_removal() {
+        let (_dir, mut engine) = open_temp();
+        engine.set("alpha".into(), "one".into()).expect("set");
+        engine.remove("alpha").expect("remove");
+        engine.set("alpha".into(), "two".into()).expect("set again");
+        assert_eq!(engine.get("alpha").expect("get"), "two");
+    }
+
+    #[test]
+    fn remove_leaves_other_keys_alone() {
+        let (_dir, mut engine) = open_temp();
+        engine.set("alpha".into(), "one".into()).expect("set alpha");
+        engine.set("beta".into(), "two".into()).expect("set beta");
+        engine.remove("alpha").expect("remove alpha");
+        assert_eq!(engine.get("beta").expect("get"), "two");
+    }
+
+    #[test]
+    fn an_accepted_remove_appends_a_tombstone() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open(dir.path()).expect("open");
+        let log = dir.path().join("0.log");
+
+        engine.set("alpha".into(), "one".into()).expect("set");
+
+        let before = std::fs::metadata(&log).expect("metadata").len();
+        engine.remove("alpha").expect("remove");
+        let after = std::fs::metadata(&log).expect("metadata").len();
+        assert!(
+            after > before,
+            "an accepted remove must append a tombstone to the log"
         );
     }
 }
