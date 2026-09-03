@@ -12,6 +12,8 @@ pub enum EngineError {
     ValueTooLarge { len: usize },
     #[error("engine is shutting down")]
     ShuttingDown,
+    #[error("failed to encode a record: {0}")]
+    Encode(String),
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
