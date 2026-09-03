@@ -1,6 +1,9 @@
 mod command;
+mod engine;
 mod error;
+mod keydir;
 mod record;
 
 pub use command::Command;
+pub use engine::Engine;
 pub use error::{EngineError, Result};

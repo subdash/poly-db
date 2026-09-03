@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: remove in Task 4, when engine.rs calls these
-
 use crate::{Command, EngineError, Result};
 
 pub(crate) const HEADER_LEN: usize = size_of::<u32>() * 2;
