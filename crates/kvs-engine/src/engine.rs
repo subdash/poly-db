@@ -19,10 +19,18 @@ pub struct Engine {
     key_dir: KeyDir,
     #[allow(dead_code)]
     data_directory_path: PathBuf,
+    policy: FsyncPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FsyncPolicy {
+    #[default]
+    Always,
+    Never,
 }
 
 impl Engine {
-    pub fn open(path: impl AsRef<Path>) -> Result<Engine> {
+    pub fn open_with(path: impl AsRef<Path>, policy: FsyncPolicy) -> Result<Engine> {
         // Create dir if it does not exist
         let dir = path.as_ref();
         std::fs::create_dir_all(dir)?;
@@ -58,9 +66,14 @@ impl Engine {
             write_offset: offset,
             read_handle,
             key_dir,
+            policy,
         };
 
         Ok(engine)
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Engine> {
+        Engine::open_with(path, FsyncPolicy::default())
     }
 
     fn replay(reader: impl Read) -> Result<(KeyDir, u64)> {
@@ -192,10 +205,16 @@ impl Engine {
         let record_len = record.len();
         let payload_len = (record_len - HEADER_LEN) as u32;
 
-        // Append the bytes, flush (buffer -> OS) and fsync (OS -> disk), update offset
+        // Append the bytes, flush (buffer -> OS) and fsync (OS -> disk)
+        // when policy instructs us to, update offset
         self.appender.write_all(&record)?;
         self.appender.flush()?;
-        self.appender.get_ref().sync_data()?;
+        match self.policy {
+            FsyncPolicy::Always => {
+                self.appender.get_ref().sync_data()?;
+            }
+            FsyncPolicy::Never => {}
+        }
         self.write_offset += record_len as u64;
 
         Ok((pos, payload_len))
@@ -432,5 +451,21 @@ mod tests {
         let after = std::fs::metadata(&log).expect("metadata").len();
 
         assert_eq!(before, after, "validation must happen before the append");
+    }
+
+    #[test]
+    fn the_never_policy_still_round_trips() {
+        let dir = TempDir::new().expect("tempdir");
+        {
+            let mut engine = Engine::open_with(dir.path(), FsyncPolicy::Never).expect("open");
+            engine.set("alpha".into(), "one".into()).expect("set");
+        }
+        let engine = Engine::open(dir.path()).expect("reopen");
+        assert_eq!(engine.get("alpha").expect("get"), "one");
+    }
+
+    #[test]
+    fn the_default_policy_is_always() {
+        assert_eq!(FsyncPolicy::default(), FsyncPolicy::Always);
     }
 }

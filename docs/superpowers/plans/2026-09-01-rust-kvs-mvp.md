@@ -872,6 +872,10 @@ Run: `cargo test -p kvs-engine`
 Expected: PASS — 22 tests in the lib target, 3 in the `recovery` target. Cargo
 reports each test binary separately; there is no combined total.
 
+(In practice some of Task 8's size-limit work landed here, because the replay
+guard against an absurd declared length needs those constants. If you follow
+that route the counts run ahead; Task 8's checkpoint is the reconciled one.)
+
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -1141,7 +1145,7 @@ pub use engine::{Engine, FsyncPolicy, MAX_KEY_BYTES, MAX_VALUE_BYTES};
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `cargo test -p kvs-engine`
-Expected: PASS — 29 in the lib target, 5 in `recovery`.
+Expected: PASS — 30 in the lib target, 7 in `recovery`.
 
 - [ ] **Step 5: Commit**
 
@@ -1308,7 +1312,7 @@ is worse than aborting. Task 13 maps that to a 500 at the HTTP boundary.
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `cargo test -p kvs-engine`
-Expected: PASS — 34 in the lib target, 5 in `recovery`. Every Phase 1 test must
+Expected: PASS — 35 in the lib target, 7 in `recovery`. Every Phase 1 test must
 still pass **unmodified**; that is what tells you the refactor preserved
 behaviour.
 
@@ -2417,9 +2421,9 @@ git add crates/kvs-server
 git commit -m "feat(server): wire up main and add an end-to-end socket test"
 ```
 
-**The MVP is complete.** `cargo test --workspace` should report 33 tests in the
-engine's lib target, 5 in `recovery`, and 4 + 3 + 16 + 1 across the server's
-`writer`, `concurrency`, `api`, and `smoke` targets — 63 in all.
+**The MVP is complete.** `cargo test --workspace` should report 35 tests in the
+engine's lib target, 7 in `recovery`, and 4 + 3 + 16 + 1 across the server's
+`writer`, `concurrency`, `api`, and `smoke` targets — 66 in all.
 
 ---
 
