@@ -1,5 +1,5 @@
 use crate::{
-    Command, EngineError, Result,
+    Command, EngineError, Reader, Result,
     keydir::{Entry, KeyDir},
     record::{self, HEADER_LEN, MAX_KEY_BYTES, MAX_PAYLOAD_BYTES, MAX_VALUE_BYTES},
 };
@@ -7,19 +7,17 @@ use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, ErrorKind, Read, Write},
-    os::unix::fs::FileExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 pub struct Engine {
-    appender: BufWriter<File>,
     write_offset: u64,
-    read_handle: Arc<File>,
-    key_dir: KeyDir,
+    writer: BufWriter<File>,
+    reader: Reader,
+    policy: FsyncPolicy,
     #[allow(dead_code)]
     data_directory_path: PathBuf,
-    policy: FsyncPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,31 +40,34 @@ impl Engine {
             .append(true)
             .create(true)
             .open(&log_path)?;
-
         let read_handle = Arc::new(File::open(&log_path)?);
+
         // Replay takes an `impl Read`, which Arc<File> does not implement, so we must dereference
         // the pointer and pass a reference to the file handle it points to.
-        let (key_dir, offset) = Engine::replay(&*read_handle)?;
+        let (key_dir, write_offset) = Engine::replay(&*read_handle)?;
 
-        // In the case of a corrupted log, the loop will exit early and the log will be
+        // In the case of a corrupted log, the replay loop will exit early and the log will be
         // truncated to the end of the last uncorrupted entry.
-        let unprocessed_bytes = file.metadata()?.len() - offset;
+        let unprocessed_bytes = file.metadata()?.len() - write_offset;
         if unprocessed_bytes > 0 {
-            file.set_len(offset)?;
+            file.set_len(write_offset)?;
             eprintln!(
-                "{unprocessed_bytes} bytes after byte {offset} were corrupted and truncated from the log."
+                "{unprocessed_bytes} bytes after byte {write_offset} were corrupted and truncated from the log."
             );
         }
 
+        let reader = Reader {
+            key_dir,
+            read_handle,
+        };
         let writer = BufWriter::new(file);
 
         let engine = Engine {
             data_directory_path: dir.to_path_buf(),
-            appender: writer,
-            write_offset: offset,
-            read_handle,
-            key_dir,
+            writer,
+            write_offset,
             policy,
+            reader,
         };
 
         Ok(engine)
@@ -76,7 +77,11 @@ impl Engine {
         Engine::open_with(path, FsyncPolicy::default())
     }
 
-    fn replay(reader: impl Read) -> Result<(KeyDir, u64)> {
+    pub fn reader(&self) -> Reader {
+        self.reader.clone()
+    }
+
+    fn replay(reader: impl Read) -> Result<(Arc<RwLock<KeyDir>>, u64)> {
         let mut key_dir = HashMap::new();
         let mut reader = BufReader::new(reader);
         let mut offset = 0;
@@ -131,6 +136,7 @@ impl Engine {
             offset += HEADER_LEN as u64 + payload_len as u64;
         }
 
+        let key_dir = Arc::new(RwLock::new(key_dir));
         Ok((key_dir, offset))
     }
 
@@ -158,23 +164,18 @@ impl Engine {
             file_id: 0,
             len,
         };
-        self.key_dir.insert(key, entry);
+
+        self.reader
+            .key_dir
+            .write()
+            .expect("keydir lock poisoned")
+            .insert(key, entry);
 
         Ok(())
     }
 
     pub fn get(&self, key: &str) -> Result<String> {
-        // Look up entry in key dir
-        let entry = self.key_dir.get(key).ok_or(EngineError::KeyNotFound)?;
-        // Read contents into buffer
-        let mut record = vec![0u8; HEADER_LEN + entry.len as usize];
-        self.read_handle.read_exact_at(&mut record, entry.pos)?;
-
-        // Decode and return
-        match record::decode(&record, entry.pos)? {
-            Command::Set { value, .. } => Ok(value),
-            Command::Remove { .. } => Err(EngineError::Corrupt { offset: entry.pos }),
-        }
+        self.reader.get(key)
     }
 
     pub fn remove(&mut self, key: &str) -> Result<()> {
@@ -182,8 +183,15 @@ impl Engine {
             return Err(EngineError::KeyTooLarge { len: key.len() });
         }
 
+        let key_found = self
+            .reader
+            .key_dir
+            .read() // Obtain read-lock which dies after let binding
+            .expect("keydir lock poisoned")
+            .contains_key(key);
+
         // Check for membership in key dir
-        if !self.key_dir.contains_key(key) {
+        if !key_found {
             return Err(EngineError::KeyNotFound);
         }
 
@@ -191,8 +199,13 @@ impl Engine {
             key: String::from(key),
         };
 
+        // Append command to log
         self.append(&cmd)?;
-        self.key_dir.remove(key);
+        self.reader
+            .key_dir
+            .write() // Obtain write lock to remove key from memory
+            .expect("keydir lock poisoned")
+            .remove(key);
 
         Ok(())
     }
@@ -207,11 +220,11 @@ impl Engine {
 
         // Append the bytes, flush (buffer -> OS) and fsync (OS -> disk)
         // when policy instructs us to, update offset
-        self.appender.write_all(&record)?;
-        self.appender.flush()?;
+        self.writer.write_all(&record)?;
+        self.writer.flush()?;
         match self.policy {
             FsyncPolicy::Always => {
-                self.appender.get_ref().sync_data()?;
+                self.writer.get_ref().sync_data()?;
             }
             FsyncPolicy::Never => {}
         }
