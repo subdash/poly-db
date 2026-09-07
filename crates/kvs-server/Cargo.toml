@@ -22,3 +22,10 @@ tower = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 
+[lib]
+name = "kvs_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kvs-server"
+path = "src/main.rs"

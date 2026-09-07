@@ -210,6 +210,12 @@ impl Engine {
         Ok(())
     }
 
+    pub fn sync(&mut self) -> Result<()> {
+        self.writer.flush()?;
+        self.writer.get_ref().sync_data()?;
+        Ok(())
+    }
+
     fn append(&mut self, cmd: &Command) -> Result<(u64, u32)> {
         // Capture log position prior to appending
         let pos = self.write_offset;

@@ -1332,6 +1332,11 @@ git commit -m "feat(engine): add a cloneable Reader over a shared keydir"
 
 **Interfaces:**
 - Consumes: `Engine`, `Reader`, `EngineError` from `kvs-engine`.
+- Also adds to `kvs-engine`: `pub fn Engine::sync(&mut self) -> Result<()>`,
+  which flushes and `sync_data`s unconditionally, regardless of `FsyncPolicy`.
+  The writer thread calls it after the loop so that a completed `join()` means
+  the data is on disk even under `FsyncPolicy::Never`. Without it, shutdown
+  relies on `BufWriter`'s `Drop`, which swallows errors and never fsyncs.
 - Produces:
 
 ```rust
