@@ -54,6 +54,7 @@ pub fn spawn(engine: Engine, capacity: usize) -> (KvHandle, std::thread::JoinHan
     (kv_handle, join_handle)
 }
 
+#[derive(Clone)]
 pub struct KvHandle {
     sender: mpsc::Sender<Request>,
     reader: Reader,

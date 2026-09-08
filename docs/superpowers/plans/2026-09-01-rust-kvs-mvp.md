@@ -1002,9 +1002,9 @@ the offset at which each record starts; on the first failure, call
 scanning. A short read at EOF is the same case as a CRC failure — both mean
 "the log ends here".
 
-Log the truncation with `eprintln!` for now; Task 12 replaces that with
-`tracing::warn!`. Silently discarding data is not acceptable even when it is
-the right thing to do.
+Log the truncation with `eprintln!` for now; Task 16 replaces that with
+`tracing::warn!`, once a subscriber exists to receive it. Silently discarding
+data is not acceptable even when it is the right thing to do.
 
 - [ ] **Step 4: Run the tests and watch them pass**
 
@@ -1763,7 +1763,7 @@ the spec now have tests behind them rather than prose.
 - Produces:
   - `pub fn routes::router(handle: KvHandle) -> axum::Router`
   - `pub struct Config { pub data_dir: PathBuf, pub addr: SocketAddr, pub fsync: FsyncArg }` deriving `clap::Parser`
-  - `pub enum FsyncArg { Always, Never }` deriving `clap::ValueEnum`, with `impl From<FsyncArg> for FsyncPolicy`
+  - `pub enum FsyncArg { Always, Never }` deriving `Clone, Copy, Debug, clap::ValueEnum`, with `impl From<FsyncArg> for FsyncPolicy` (`ValueEnum` requires `Clone` as a supertrait; `Debug` is needed for `Config`'s own derive)
 
 **Why `router` takes a `KvHandle` and returns a `Router`:** it makes the whole
 HTTP surface constructible in a test without binding a port. Every test in this
@@ -2388,6 +2388,25 @@ async fn main() -> anyhow::Result<()> {
     todo!("yours to write")
 }
 ```
+
+**Also in this task: move the crates' `eprintln!` diagnostics onto `tracing`.**
+There are two — the torn-tail truncation warning in `kvs-engine`'s `open`, and
+the failed-final-sync warning in the writer thread. Both become `tracing::warn!`
+and `tracing::error!` respectively, which means adding `tracing` to
+`kvs-engine`'s dependencies.
+
+That is a smaller concession than it looks. `tracing` is a facade, not a
+runtime: with no subscriber installed its macros compile down to near-nothing,
+and a library emitting structured diagnostics through it is ordinary practice.
+It is not the same category of dependency as `tokio` or `clap`, which is why
+those stayed out of the engine and this one does not have to. The alternative —
+leaving the engine on stderr — means the single most important message the
+store can emit, *we deleted some of your data*, is the one message that bypasses
+your log pipeline entirely.
+
+This is the right task for it because until now there has been no subscriber to
+receive the events, so the swap would have made the warnings disappear rather
+than move.
 
 This is the one place `anyhow` earns its keep: `main` reports errors, it never
 matches on them. Log the resolved config at startup — data dir, address, fsync
