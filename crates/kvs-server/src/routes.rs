@@ -16,7 +16,7 @@ use crate::{
 pub fn router(handle: KvHandle) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/v1/kv/{key}", get(get_key).put(put_key))
+        .route("/v1/kv/{key}", get(get_key).put(put_key).delete(delete_key))
         .with_state(handle)
         .layer(DefaultBodyLimit::max(MAX_VALUE_BYTES + 8 * 1024))
 }
@@ -39,12 +39,7 @@ async fn put_key(
     Path(key): Path<String>,
     payload: Result<Json<SetRequest>, JsonRejection>,
 ) -> Result<StatusCode, AppError> {
-    // Validate key length in the handler so it is rejected at the HTTP layer rather than
-    // taking up space in the bounded channel.
-    let key_len = key.len();
-    if key_len > MAX_KEY_BYTES {
-        return Err(AppError::Engine(EngineError::KeyTooLarge { len: key_len }));
-    }
+    check_key(&key)?;
 
     match payload {
         Ok(Json(payload)) => {
@@ -62,5 +57,27 @@ async fn put_key(
             Ok(StatusCode::NO_CONTENT)
         }
         Err(rejection) => Err(AppError::BadRequest(rejection.body_text())),
+    }
+}
+
+async fn delete_key(
+    State(handle): State<KvHandle>,
+    Path(key): Path<String>,
+) -> Result<StatusCode, AppError> {
+    check_key(&key)?;
+
+    handle.remove(key).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn check_key(key: &str) -> Result<(), AppError> {
+    // Validate key length in the handler so it is rejected at the HTTP layer rather than
+    // taking up space in the bounded channel.
+    let key_len = key.len();
+    if key_len > MAX_KEY_BYTES {
+        Err(AppError::Engine(EngineError::KeyTooLarge { len: key_len }))
+    } else {
+        Ok(())
     }
 }

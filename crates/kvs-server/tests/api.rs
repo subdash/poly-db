@@ -205,3 +205,85 @@ async fn put_rejects_an_oversized_key() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(error_code(&body), "payload_too_large");
 }
+
+use kvs_server::writer::KvHandle;
+
+fn delete(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .body(Body::empty())
+        .expect("request")
+}
+
+#[tokio::test]
+async fn delete_removes_a_key() {
+    let app = test_app();
+
+    let (status, _) = send(&app, put("/v1/kv/alpha", r#"{"value":"one"}"#)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = send(&app, delete("/v1/kv/alpha")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = send(&app, get("/v1/kv/alpha")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "not_found");
+}
+
+#[tokio::test]
+async fn delete_on_an_unknown_key_is_404() {
+    let app = test_app();
+    let (status, body) = send(&app, delete("/v1/kv/ghost")).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "not_found");
+}
+
+#[tokio::test]
+async fn a_key_can_be_written_again_after_deletion() {
+    let app = test_app();
+
+    send(&app, put("/v1/kv/alpha", r#"{"value":"one"}"#)).await;
+    send(&app, delete("/v1/kv/alpha")).await;
+    let (status, _) = send(&app, put("/v1/kv/alpha", r#"{"value":"two"}"#)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, body) = send(&app, get("/v1/kv/alpha")).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(json["value"], "two");
+}
+
+#[tokio::test]
+async fn writes_are_503_when_the_writer_is_gone_but_reads_still_work() {
+    let dir = TempDir::new().expect("tempdir");
+    let engine = Engine::open(dir.path()).expect("open");
+    let reader = engine.reader();
+
+    let (tx, rx) = writer::channel(16);
+    drop(rx); // the writer thread is gone
+    let app = TestApp {
+        _dir: dir,
+        router: routes::router(KvHandle::new(tx, reader)),
+    };
+
+    let (status, body) = send(&app, put("/v1/kv/alpha", r#"{"value":"one"}"#)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&body), "unavailable");
+
+    let (status, body) = send(&app, delete("/v1/kv/alpha")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&body), "unavailable");
+
+    // Reads bypass the writer entirely, so the store still serves what it has.
+    let (status, _) = send(&app, get("/v1/kv/alpha")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a read must answer, not
+  fail"
+    );
+
+    let (status, _) = send(&app, get("/health")).await;
+    assert_eq!(status, StatusCode::OK);
+}
