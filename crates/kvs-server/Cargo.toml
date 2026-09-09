@@ -6,7 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 kvs-engine = { path = "../kvs-engine" }
-axum = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

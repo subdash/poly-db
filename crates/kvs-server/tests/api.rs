@@ -65,3 +65,35 @@ async fn the_router_is_cloneable_for_concurrent_requests() {
     assert_eq!(first.0, StatusCode::OK);
     assert_eq!(second.0, StatusCode::OK);
 }
+
+fn error_code(body: &Bytes) -> String {
+    let json: serde_json::Value = serde_json::from_slice(body).expect("json body");
+    json["error"]["code"]
+        .as_str()
+        .expect("error.code must be a string")
+        .to_string()
+}
+
+#[tokio::test]
+async fn get_on_an_unknown_key_is_404_with_the_standard_envelope() {
+    let app = test_app();
+    let (status, body) = send(&app, get("/v1/kv/ghost")).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "not_found");
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert!(
+        json["error"]["message"].is_string(),
+        "every error carries a human-readable message"
+    );
+}
+
+#[tokio::test]
+async fn a_key_containing_percent_encoding_is_decoded() {
+    let app = test_app();
+    // The handler must receive "a b", not "a%20b".
+    let (status, body) = send(&app, get("/v1/kv/a%20b")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "not_found");
+}
