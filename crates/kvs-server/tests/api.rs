@@ -97,3 +97,111 @@ async fn a_key_containing_percent_encoding_is_decoded() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(error_code(&body), "not_found");
 }
+
+fn put(uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .expect("request")
+}
+
+#[tokio::test]
+async fn put_then_get_round_trips() {
+    let app = test_app();
+
+    let (status, _) = send(&app, put("/v1/kv/alpha", r#"{"value":"one"}"#)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = send(&app, get("/v1/kv/alpha")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(json["key"], "alpha");
+    assert_eq!(json["value"], "one");
+}
+
+#[tokio::test]
+async fn put_is_idempotent_and_overwrites() {
+    let app = test_app();
+
+    let (status, _) = send(&app, put("/v1/kv/alpha", r#"{"value":"one"}"#)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, put("/v1/kv/alpha", r#"{"value":"two"}"#)).await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "an update is not a
+  different status"
+    );
+
+    let (_, body) = send(&app, get("/v1/kv/alpha")).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(json["value"], "two");
+}
+
+#[tokio::test]
+async fn put_accepts_an_empty_value() {
+    let app = test_app();
+    let (status, _) = send(&app, put("/v1/kv/alpha", r#"{"value":""}"#)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, body) = send(&app, get("/v1/kv/alpha")).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(json["value"], "");
+}
+
+#[tokio::test]
+async fn put_rejects_a_malformed_body_with_the_standard_envelope() {
+    let app = test_app();
+    let (status, body) = send(
+        &app,
+        put(
+            "/v1/kv/alpha",
+            "not json at
+  all",
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "bad_request");
+}
+
+#[tokio::test]
+async fn put_rejects_a_body_missing_the_value_field() {
+    let app = test_app();
+    let (status, body) = send(&app, put("/v1/kv/alpha", r#"{"vlaue":"typo"}"#)).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "bad_request");
+}
+
+#[tokio::test]
+async fn put_rejects_an_oversized_value_with_the_standard_envelope() {
+    let app = test_app();
+    let value = "v".repeat(kvs_engine::MAX_VALUE_BYTES + 1);
+    let body = serde_json::to_string(&serde_json::json!({ "value": value
+    }))
+    .expect("body");
+
+    let (status, body) = send(&app, put("/v1/kv/alpha", &body)).await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        error_code(&body),
+        "payload_too_large",
+        "the body limit must leave headroom so our own check produces this
+  response"
+    );
+}
+
+#[tokio::test]
+async fn put_rejects_an_oversized_key() {
+    let app = test_app();
+    let key = "k".repeat(kvs_engine::MAX_KEY_BYTES + 1);
+    let (status, body) = send(&app, put(&format!("/v1/kv/{key}"), r#"{"value":"one"}"#)).await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_code(&body), "payload_too_large");
+}
