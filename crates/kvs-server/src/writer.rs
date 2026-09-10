@@ -40,7 +40,7 @@ pub fn spawn_with(
         }
 
         if let Err(e) = engine.sync() {
-            eprintln!("writer thread: final sync failed: {e}")
+            tracing::error!(error = %e, "final sync failed")
         }
     })
 }

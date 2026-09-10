@@ -51,8 +51,10 @@ impl Engine {
         let unprocessed_bytes = file.metadata()?.len() - write_offset;
         if unprocessed_bytes > 0 {
             file.set_len(write_offset)?;
-            eprintln!(
-                "{unprocessed_bytes} bytes after byte {write_offset} were corrupted and truncated from the log."
+            tracing::warn!(
+                bytes = unprocessed_bytes,
+                offset = write_offset,
+                "some bytes were corrupted and truncated from the log"
             );
         }
 
