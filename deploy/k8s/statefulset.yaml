@@ -43,6 +43,28 @@ spec:
           limits:
             cpu: 1000m
             memory: 512Mi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 2
+          failureThreshold: 30
+          timeoutSeconds: 2
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 3
+          timeoutSeconds: 2
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 5
+          failureThreshold: 2
+          timeoutSeconds: 2
 
   # Provision unique PVC for each pod replica so that each one gets its own storage volume
   volumeClaimTemplates:
