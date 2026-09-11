@@ -1,0 +1,7 @@
+target
+.git
+data
+docs
+Dockerfile
+.dockerignore
+.DS_Store
