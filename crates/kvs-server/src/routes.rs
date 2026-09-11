@@ -16,13 +16,19 @@ use crate::{
 pub fn router(handle: KvHandle) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/v1/kv/{key}", get(get_key).put(put_key).delete(delete_key))
+        // Routes must be registered before .layer(), or the layer won't apply to them
         .with_state(handle)
         .layer(DefaultBodyLimit::max(MAX_VALUE_BYTES + 8 * 1024))
 }
 
 async fn health() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
+}
+
+async fn ready() -> Json<serde_json::Value> {
+    Json(json!({ "status": "ready" }))
 }
 
 async fn get_key(

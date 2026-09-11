@@ -287,3 +287,30 @@ async fn writes_are_503_when_the_writer_is_gone_but_reads_still_work() {
     let (status, _) = send(&app, get("/health")).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn ready_reports_ready() {
+    let app = test_app();
+    let (status, body) = send(&app, get("/ready")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(json["status"], "ready");
+}
+
+#[tokio::test]
+async fn health_and_ready_are_separate_routes() {
+    let app = test_app();
+
+    let (health_status, health_body) = send(&app, get("/health")).await;
+    let (ready_status, ready_body) = send(&app, get("/ready")).await;
+
+    assert_eq!(health_status, StatusCode::OK);
+    assert_eq!(ready_status, StatusCode::OK);
+
+    let health: serde_json::Value = serde_json::from_slice(&health_body).expect("json");
+    let ready: serde_json::Value = serde_json::from_slice(&ready_body).expect("json");
+
+    assert_eq!(health["status"], "ok");
+    assert_eq!(ready["status"], "ready");
+}
