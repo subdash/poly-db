@@ -1,35 +1,31 @@
 use std::{
-    fs::File,
     os::unix::fs::FileExt,
     sync::{Arc, RwLock},
 };
 
 use crate::{
     Command, EngineError, Result,
-    keydir::KeyDir,
     record::{self, HEADER_LEN},
+    store::Store,
 };
 
 #[derive(Clone)]
 pub struct Reader {
-    pub(crate) key_dir: Arc<RwLock<KeyDir>>,
-    pub(crate) read_handle: Arc<File>,
+    pub(crate) store: Arc<RwLock<Store>>,
 }
 
 impl Reader {
     pub fn get(&self, key: &str) -> Result<String> {
         // Look up entry in key dir
-        let entry = self
-            .key_dir
-            .read() // Lock which dies after let binding
-            .expect("keydir lock poisoned")
-            .get(key)
-            .copied() // Return a copy of the value so we're not borrowing
-            .ok_or(EngineError::KeyNotFound)?;
+        let (entry, file) = self
+            .store
+            .read()
+            .expect("store lock poisoned")
+            .lookup(key)?;
 
         // Read contents into buffer
         let mut record = vec![0u8; HEADER_LEN + entry.len as usize];
-        self.read_handle.read_exact_at(&mut record, entry.pos)?;
+        file.read_exact_at(&mut record, entry.pos)?;
 
         // Decode and return
         match record::decode(&record, entry.pos)? {

@@ -4,6 +4,7 @@ mod error;
 mod keydir;
 mod reader;
 mod record;
+mod store;
 
 pub use command::Command;
 pub use engine::{Engine, FsyncPolicy};

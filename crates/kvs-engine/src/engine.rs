@@ -2,6 +2,7 @@ use crate::{
     Command, EngineError, Reader, Result,
     keydir::{Entry, KeyDir},
     record::{self, HEADER_LEN, MAX_KEY_BYTES, MAX_PAYLOAD_BYTES, MAX_VALUE_BYTES},
+    store::Store,
 };
 use std::{
     collections::HashMap,
@@ -58,9 +59,12 @@ impl Engine {
             );
         }
 
+        let files = HashMap::from([(0, read_handle)]);
+
+        let store = Store { key_dir, files };
+
         let reader = Reader {
-            key_dir,
-            read_handle,
+            store: Arc::new(RwLock::new(store)),
         };
         let writer = BufWriter::new(file);
 
@@ -83,7 +87,7 @@ impl Engine {
         self.reader.clone()
     }
 
-    fn replay(reader: impl Read) -> Result<(Arc<RwLock<KeyDir>>, u64)> {
+    fn replay(reader: impl Read) -> Result<(KeyDir, u64)> {
         let mut key_dir = HashMap::new();
         let mut reader = BufReader::new(reader);
         let mut offset = 0;
@@ -138,7 +142,6 @@ impl Engine {
             offset += HEADER_LEN as u64 + payload_len as u64;
         }
 
-        let key_dir = Arc::new(RwLock::new(key_dir));
         Ok((key_dir, offset))
     }
 
@@ -168,9 +171,10 @@ impl Engine {
         };
 
         self.reader
-            .key_dir
+            .store
             .write()
-            .expect("keydir lock poisoned")
+            .expect("store lock poisoned")
+            .key_dir
             .insert(key, entry);
 
         Ok(())
@@ -187,9 +191,10 @@ impl Engine {
 
         let key_found = self
             .reader
-            .key_dir
+            .store
             .read() // Obtain read-lock which dies after let binding
-            .expect("keydir lock poisoned")
+            .expect("store lock poisoned")
+            .key_dir
             .contains_key(key);
 
         // Check for membership in key dir
@@ -204,9 +209,10 @@ impl Engine {
         // Append command to log
         self.append(&cmd)?;
         self.reader
-            .key_dir
+            .store
             .write() // Obtain write lock to remove key from memory
             .expect("keydir lock poisoned")
+            .key_dir
             .remove(key);
 
         Ok(())
