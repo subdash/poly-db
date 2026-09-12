@@ -63,10 +63,14 @@ it, marks it immutable, opens `id + 1`, and installs a read handle for the new
 file. Rolling is what gives the merge anything to work on: without it there is
 one file, and it is the one being appended to.
 
-**The check runs after the append, not before it**, so a file may exceed
-`max_file_bytes` by at most one record. `max_file_bytes` is therefore a threshold,
-not a hard cap, and the alternative — refusing an append that would cross the
-limit — would mean a record larger than the limit could never be written at all.
+**The check runs at the start of the next append**, not at the end of the
+previous one, so the record that crosses the threshold is written whole into the
+file it overflows and the roll happens before the record after it. A file may
+therefore exceed `max_file_bytes` by at most one record — a threshold, not a hard
+cap — and no empty trailing file is created merely because the last write was the
+one that crossed the line. The alternative, refusing an append that would cross
+the limit, would mean a record larger than the limit could never be written at
+all.
 
 ## 3. The read path
 
@@ -111,10 +115,20 @@ its own locking. It never touches the writer's `BufWriter`, never writes to the
 active file, and never needs `&mut Engine`. The only shared mutable state is the
 `Store`, which was already shared.
 
-`Engine::open` spawns the thread and keeps a `std::sync::mpsc::SyncSender` with
-**capacity 1**. A `try_send` that fails means a merge is already queued, so the
-request is dropped. That single line is the entire "one merge at a time" policy —
-no flag, no mutex.
+`Engine::open` spawns the thread and keeps a `std::sync::mpsc::SyncSender`
+alongside a `merge_pending: Arc<AtomicBool>`. The writer claims the flag with
+`swap(true)` and only then rolls and sends; the merge thread clears it when it
+finishes, successfully or not.
+
+**The flag is the policy, not the channel's capacity.** A capacity-1 channel is
+empty for as long as a merge is actually running, so `try_send` would succeed
+again and queue a second merge behind the first. Worse, `output_id` is the id of
+the file the writer just rolled, so the roll has to happen *before* the send — and
+a store sitting above its threshold re-evaluates the trigger on every append, so a
+`try_send` that fails after a successful roll produces one new empty log file per
+write. Claiming the flag first is what makes both problems go away, and it is what
+lets `compact()` answer "already running" synchronously, with no window in which
+a caller sees the wrong answer.
 
 ### 4.2 A merge begins by rolling
 
@@ -299,7 +313,8 @@ total_bytes >= min_merge_bytes
 The cast matters: both counters are `u64`, and integer division would floor the
 ratio to `0` for every case below 100% dead and never fire.
 
-then `try_send`. The capacity-1 channel absorbs everything else.
+then claim `merge_pending`, roll, and `try_send`. If either the roll or the send
+fails, clear the flag before returning, or the store never merges again.
 
 ### 7.3 Configuration
 
@@ -325,7 +340,7 @@ returns the counts the response body reports. That makes tests deterministic and
 the demonstration watchable, at the cost of stalling writes for the duration —
 acceptable for an explicitly requested operation.
 
-When the capacity-1 channel is already occupied, `compact()` returns a new
+When `merge_pending` is already set, `compact()` returns a new
 `EngineError::MergeInProgress` rather than queueing behind the running merge.
 That variant is what the handler maps to `409`; without it the endpoint has no way
 to distinguish "already running" from "done", and `AppError`'s match on
@@ -385,9 +400,10 @@ once startup time is measured rather than assumed.
 value the same as a megabyte of dead keys. A store dominated by large values
 might prefer a different trigger.
 
-**Multiple concurrent merges.** The capacity-1 channel is a deliberate ceiling.
-Lifting it means partitioning the file space so two merges cannot claim the same
-inputs.
+**Multiple concurrent merges.** The single `merge_pending` flag is a deliberate
+ceiling. Lifting it means partitioning the file space so two merges cannot claim
+the same inputs, and giving the recovery rules in section 5.3 a way to tell two
+interrupted merges apart.
 
 **A manifest file.** The recovery rules in section 5.3 read state off the
 filesystem, which works because the merge output is always a single file with a
