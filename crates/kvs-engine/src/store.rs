@@ -7,6 +7,7 @@ use crate::keydir::{Entry, KeyDir};
 #[derive(Default)]
 pub(crate) struct Store {
     pub(crate) key_dir: KeyDir,
+    // Positional-read-only. Cursor based reads will silently fail.
     pub(crate) files: HashMap<u32, Arc<File>>,
 }
 
@@ -23,7 +24,7 @@ impl Store {
             .get(&entry.file_id)
             .ok_or(EngineError::Corrupt { offset: entry.pos })?;
 
-        Ok((entry, Arc::clone(file)))
+        Ok((entry, file.clone()))
     }
 }
 

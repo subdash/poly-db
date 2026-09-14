@@ -2,8 +2,10 @@ mod command;
 mod engine;
 mod error;
 mod keydir;
+mod layout;
 mod reader;
 mod record;
+mod replay;
 mod store;
 
 pub use command::Command;

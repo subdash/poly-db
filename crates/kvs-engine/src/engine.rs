@@ -1,13 +1,13 @@
 use crate::{
     Command, EngineError, Reader, Result,
-    keydir::{Entry, KeyDir},
-    record::{self, HEADER_LEN, MAX_KEY_BYTES, MAX_PAYLOAD_BYTES, MAX_VALUE_BYTES},
-    store::Store,
+    keydir::Entry,
+    layout::log_path,
+    record::{self, HEADER_LEN, MAX_KEY_BYTES, MAX_VALUE_BYTES},
+    replay,
 };
 use std::{
-    collections::HashMap,
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter, ErrorKind, Read, Write},
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -34,44 +34,40 @@ impl Engine {
         let dir = path.as_ref();
         std::fs::create_dir_all(dir)?;
 
-        // Create file if it doesn't exist, grab append/read file descriptors,
-        // offset and initialize engine.
-        let log_path = dir.join("0.log");
+        let mut replayed = replay::build(dir)?;
+
         let file = OpenOptions::new()
             .append(true)
             .create(true)
-            .open(&log_path)?;
-        let read_handle = Arc::new(File::open(&log_path)?);
-
-        // Replay takes an `impl Read`, which Arc<File> does not implement, so we must dereference
-        // the pointer and pass a reference to the file handle it points to.
-        let (key_dir, write_offset) = Engine::replay(&*read_handle)?;
+            .open(log_path(dir, replayed.active_id))?;
 
         // In the case of a corrupted log, the replay loop will exit early and the log will be
         // truncated to the end of the last uncorrupted entry.
-        let unprocessed_bytes = file.metadata()?.len() - write_offset;
+        let unprocessed_bytes = file.metadata()?.len().saturating_sub(replayed.write_offset);
         if unprocessed_bytes > 0 {
-            file.set_len(write_offset)?;
+            file.set_len(replayed.write_offset)?;
             tracing::warn!(
                 bytes = unprocessed_bytes,
-                offset = write_offset,
+                offset = replayed.write_offset,
                 "some bytes were corrupted and truncated from the log"
             );
         }
 
-        let files = HashMap::from([(0, read_handle)]);
-
-        let store = Store { key_dir, files };
+        let active_file_read_handle = Arc::new(File::open(log_path(dir, replayed.active_id))?);
+        replayed
+            .store
+            .files
+            .insert(replayed.active_id, active_file_read_handle);
 
         let reader = Reader {
-            store: Arc::new(RwLock::new(store)),
+            store: Arc::new(RwLock::new(replayed.store)),
         };
         let writer = BufWriter::new(file);
 
         let engine = Engine {
             data_directory_path: dir.to_path_buf(),
             writer,
-            write_offset,
+            write_offset: replayed.write_offset,
             policy,
             reader,
         };
@@ -85,64 +81,6 @@ impl Engine {
 
     pub fn reader(&self) -> Reader {
         self.reader.clone()
-    }
-
-    fn replay(reader: impl Read) -> Result<(KeyDir, u64)> {
-        let mut key_dir = HashMap::new();
-        let mut reader = BufReader::new(reader);
-        let mut offset = 0;
-
-        loop {
-            // Read header
-            let mut header = [0u8; HEADER_LEN];
-
-            match reader.read_exact(&mut header) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-
-            // Read payload
-            let payload_len = record::payload_len(&header);
-
-            if payload_len as usize > MAX_PAYLOAD_BYTES {
-                // Don't allocate more than the max allowed
-                break;
-            }
-
-            let mut full_record = vec![0u8; HEADER_LEN + payload_len as usize];
-            full_record[0..HEADER_LEN].copy_from_slice(&header);
-
-            match reader.read_exact(&mut full_record[HEADER_LEN..]) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-
-            // Decode
-            let Ok(cmd) = record::decode(&full_record, offset) else {
-                break;
-            };
-
-            match cmd {
-                Command::Set { key, .. } => {
-                    let entry = Entry {
-                        pos: offset,
-                        file_id: 0,
-                        len: payload_len,
-                    };
-                    key_dir.insert(key, entry);
-                }
-
-                Command::Remove { key } => {
-                    key_dir.remove(&key);
-                }
-            };
-
-            offset += HEADER_LEN as u64 + payload_len as u64;
-        }
-
-        Ok((key_dir, offset))
     }
 
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
