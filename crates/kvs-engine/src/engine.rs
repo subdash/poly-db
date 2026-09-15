@@ -1,5 +1,6 @@
 use crate::{
-    Command, EngineError, Reader, Result,
+    Command, EngineConfig, EngineError, Reader, Result,
+    config::FsyncPolicy,
     keydir::Entry,
     layout::log_path,
     record::{self, HEADER_LEN, MAX_KEY_BYTES, MAX_VALUE_BYTES},
@@ -16,20 +17,13 @@ pub struct Engine {
     write_offset: u64,
     writer: BufWriter<File>,
     reader: Reader,
-    policy: FsyncPolicy,
-    #[allow(dead_code)]
+    config: EngineConfig,
     data_directory_path: PathBuf,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FsyncPolicy {
-    #[default]
-    Always,
-    Never,
+    active_id: u32,
 }
 
 impl Engine {
-    pub fn open_with(path: impl AsRef<Path>, policy: FsyncPolicy) -> Result<Engine> {
+    pub fn open_with(path: impl AsRef<Path>, config: EngineConfig) -> Result<Engine> {
         // Create dir if it does not exist
         let dir = path.as_ref();
         std::fs::create_dir_all(dir)?;
@@ -68,15 +62,16 @@ impl Engine {
             data_directory_path: dir.to_path_buf(),
             writer,
             write_offset: replayed.write_offset,
-            policy,
+            config,
             reader,
+            active_id: replayed.active_id,
         };
 
         Ok(engine)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Engine> {
-        Engine::open_with(path, FsyncPolicy::default())
+        Engine::open_with(path, EngineConfig::default())
     }
 
     pub fn reader(&self) -> Reader {
@@ -99,15 +94,9 @@ impl Engine {
         };
 
         // Append to log
-        let (pos, len) = self.append(&cmd)?;
+        let entry = self.append(&cmd)?;
 
         // Write to key dir
-        let entry = Entry {
-            pos,
-            file_id: 0,
-            len,
-        };
-
         self.reader
             .store
             .write()
@@ -149,7 +138,7 @@ impl Engine {
         self.reader
             .store
             .write() // Obtain write lock to remove key from memory
-            .expect("keydir lock poisoned")
+            .expect("store lock poisoned")
             .key_dir
             .remove(key);
 
@@ -162,7 +151,8 @@ impl Engine {
         Ok(())
     }
 
-    fn append(&mut self, cmd: &Command) -> Result<(u64, u32)> {
+    fn append(&mut self, cmd: &Command) -> Result<Entry> {
+        self.maybe_roll()?;
         // Capture log position prior to appending
         let pos = self.write_offset;
 
@@ -174,7 +164,7 @@ impl Engine {
         // when policy instructs us to, update offset
         self.writer.write_all(&record)?;
         self.writer.flush()?;
-        match self.policy {
+        match self.config.fsync {
             FsyncPolicy::Always => {
                 self.writer.get_ref().sync_data()?;
             }
@@ -182,7 +172,60 @@ impl Engine {
         }
         self.write_offset += record_len as u64;
 
-        Ok((pos, payload_len))
+        let entry = Entry {
+            file_id: self.active_id,
+            pos,
+            len: payload_len,
+        };
+
+        Ok(entry)
+    }
+
+    /// Close the active file, mark it immutable, and open `active_id + 1`.
+    /// Returns the id of the file that was just closed.
+    fn roll(&mut self) -> Result<u32> {
+        // Flush buf writer and sync data of the current active file. An FsyncPolicy
+        // of `Never` does not apply here. We need to fsync the file before declaring
+        // it immutable.
+        self.sync()?;
+
+        let old_active_id = self.active_id;
+        let new_active_id = old_active_id + 1;
+        let log_file_path = log_path(&self.data_directory_path, new_active_id);
+
+        // Create the new log file and a write handle for it.
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&log_file_path)?;
+
+        // Create a read handle for the new log file.
+        let active_file_read_handle = Arc::new(File::open(&log_file_path)?);
+
+        // Replace the writer for the old log file with the new
+        self.writer = BufWriter::new(file);
+        // Insert the read handle of the new log file into the hash map
+        self.reader
+            .store
+            .write()
+            .expect("store lock poisoned")
+            .files
+            .insert(new_active_id, active_file_read_handle);
+
+        // Update active id to point to new log file and set offset to 0 since nothing is written yet
+        self.active_id = new_active_id;
+        self.write_offset = 0;
+
+        Ok(old_active_id)
+    }
+
+    /// Roll if the active file has passed `max_file_bytes` and is not empty.
+    fn maybe_roll(&mut self) -> Result<()> {
+        if self.write_offset > 0 && self.write_offset >= self.config.max_file_bytes {
+            self.roll()?;
+        }
+
+        Ok(())
     }
 }
 
@@ -422,7 +465,14 @@ mod tests {
     fn the_never_policy_still_round_trips() {
         let dir = TempDir::new().expect("tempdir");
         {
-            let mut engine = Engine::open_with(dir.path(), FsyncPolicy::Never).expect("open");
+            let mut engine = Engine::open_with(
+                dir.path(),
+                EngineConfig {
+                    fsync: FsyncPolicy::Never,
+                    ..Default::default()
+                },
+            )
+            .expect("open");
             engine.set("alpha".into(), "one".into()).expect("set");
         }
         let engine = Engine::open(dir.path()).expect("reopen");
@@ -432,5 +482,146 @@ mod tests {
     #[test]
     fn the_default_policy_is_always() {
         assert_eq!(FsyncPolicy::default(), FsyncPolicy::Always);
+    }
+
+    use crate::{EngineConfig, FsyncPolicy, layout::log_ids};
+
+    fn small_files(max_file_bytes: u64) -> EngineConfig {
+        EngineConfig {
+            max_file_bytes,
+            ..EngineConfig::default()
+        }
+    }
+
+    #[test]
+    fn the_default_config_is_fsync_always_and_64_mib_files() {
+        let config = EngineConfig::default();
+        assert_eq!(config.fsync, FsyncPolicy::Always);
+        assert_eq!(config.max_file_bytes, 64 * 1024 * 1024);
+        assert_eq!(config.dead_ratio, 0.5);
+        assert_eq!(config.min_merge_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn a_fresh_store_has_exactly_one_log_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open_with(dir.path(), small_files(64)).expect("open");
+        engine.set("alpha".into(), "one".into()).expect("set");
+        assert_eq!(log_ids(dir.path()).expect("log_ids"), vec![0]);
+    }
+
+    #[test]
+    fn crossing_the_size_threshold_rolls_to_a_new_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open_with(dir.path(), small_files(32)).expect("open");
+
+        // Each record is well over 32 bytes, so every write rolls.
+        for i in 0..3 {
+            engine
+                .set(format!("key-{i}"), "a-value-long-enough-to-cross".into())
+                .expect("set");
+        }
+
+        assert_eq!(log_ids(dir.path()).expect("log_ids"), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn a_file_may_exceed_the_threshold_by_one_record() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open_with(dir.path(), small_files(8)).expect("open");
+        engine.set("alpha".into(), "one".into()).expect("set");
+
+        let len = std::fs::metadata(crate::layout::log_path(dir.path(), 0))
+            .expect("metadata")
+            .len();
+        assert!(
+            len > 8,
+            "the record that crossed the line is still written whole"
+        );
+        assert_eq!(log_ids(dir.path()).expect("log_ids"), vec![0]);
+    }
+
+    #[test]
+    fn rolling_does_not_happen_while_the_active_file_is_empty() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open_with(dir.path(), small_files(8)).expect("open");
+        engine.set("alpha".into(), "one".into()).expect("set");
+        assert_eq!(log_ids(dir.path()).expect("log_ids"), vec![0]);
+
+        // File 0 is over the threshold, so this write lands in a fresh  file 1 —
+        // and must not then roll again on top of an empty file 1.
+        engine.set("beta".into(), "two".into()).expect("set");
+        assert_eq!(log_ids(dir.path()).expect("log_ids"), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_key_written_before_a_roll_is_still_readable_after_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open_with(dir.path(), small_files(8)).expect("open");
+        engine.set("alpha".into(), "one".into()).expect("set");
+        engine.set("beta".into(), "two".into()).expect("set");
+        engine.set("gamma".into(), "three".into()).expect("set");
+
+        assert_eq!(engine.get("alpha").expect("alpha"), "one");
+        assert_eq!(engine.get("beta").expect("beta"), "two");
+        assert_eq!(engine.get("gamma").expect("gamma"), "three");
+    }
+
+    #[test]
+    fn a_key_overwritten_after_a_roll_reads_back_the_newer_value() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut engine = Engine::open_with(dir.path(), small_files(8)).expect("open");
+        engine.set("alpha".into(), "old".into()).expect("set");
+        engine.set("alpha".into(), "new".into()).expect("overwrite");
+
+        assert_eq!(engine.get("alpha").expect("alpha"), "new");
+        let entry = *engine
+            .reader()
+            .store
+            .read()
+            .expect("lock")
+            .key_dir
+            .get("alpha")
+            .expect("alpha");
+        assert_eq!(entry.file_id, 1, "the newer record lives in the newer file");
+    }
+
+    #[test]
+    fn reopening_a_rolled_store_replays_every_file() {
+        let dir = TempDir::new().expect("tempdir");
+        {
+            let mut engine = Engine::open_with(dir.path(), small_files(8)).expect("open");
+            for i in 0..5 {
+                engine
+                    .set(format!("key-{i}"), format!("value-{i}"))
+                    .expect("set");
+            }
+            engine.sync().expect("sync");
+        }
+
+        let engine = Engine::open_with(dir.path(), small_files(8)).expect("reopen");
+        for i in 0..5 {
+            assert_eq!(
+                engine.get(&format!("key-{i}")).expect("get"),
+                format!("value-{i}")
+            );
+        }
+    }
+    #[test]
+    fn a_write_after_reopening_a_rolled_store_appends_to_the_highest_file() {
+        let dir = TempDir::new().expect("tempdir");
+        {
+            let mut engine = Engine::open_with(dir.path(), small_files(8)).expect("open");
+            engine.set("alpha".into(), "one".into()).expect("set");
+            engine.set("beta".into(), "two".into()).expect("set");
+            engine.sync().expect("sync");
+        }
+
+        let mut engine = Engine::open_with(dir.path(), EngineConfig::default()).expect("reopen");
+        engine.set("gamma".into(), "three".into()).expect("set");
+
+        assert_eq!(log_ids(dir.path()).expect("log_ids"), vec![0, 1]);
+        assert_eq!(engine.get("gamma").expect("gamma"), "three");
+        assert_eq!(engine.get("alpha").expect("alpha"), "one");
     }
 }

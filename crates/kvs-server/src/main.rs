@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::Parser;
-use kvs_engine::Engine;
+use kvs_engine::{Engine, EngineConfig};
 use kvs_server::{config::Config, routes, writer};
 use tokio::net::TcpListener;
 #[cfg(unix)]
@@ -17,8 +17,12 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = Config::parse();
-    let engine = Engine::open_with(&config.data_dir, config.fsync.into())
-        .context("opening the data directory")?;
+    let engine_config = EngineConfig {
+        fsync: config.fsync.into(),
+        ..Default::default()
+    };
+    let engine =
+        Engine::open_with(&config.data_dir, engine_config).context("opening the data directory")?;
     let (kv_handle, join_handle) = writer::spawn(engine, 1024);
     let router = routes::router(kv_handle);
     let listener = TcpListener::bind(config.addr)
