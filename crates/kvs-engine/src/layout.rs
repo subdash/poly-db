@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 pub(crate) const LOG_EXT: &str = "log";
 
 pub(crate) fn log_path(dir: &Path, id: u32) -> PathBuf {
-    dir.to_path_buf().join(format!("{}.{}", id, LOG_EXT))
+    dir.to_path_buf().join(format!("{id}.{LOG_EXT}"))
 }
 
 pub(crate) fn log_ids(dir: &Path) -> Result<Vec<u32>> {
     let mut ids: Vec<u32> = std::fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|entry| {
             let path = entry.path();
             path.is_file() && path.extension().is_some_and(|ext| ext == LOG_EXT)

@@ -8,6 +8,10 @@ fn open_temp() -> (TempDir, Engine) {
     (dir, engine)
 }
 
+fn framed_len(cmd: &Command) -> u64 {
+    crate::record::encode(cmd).expect("encode").len() as u64
+}
+
 //
 // get/set
 //
@@ -390,4 +394,91 @@ fn a_write_after_reopening_a_rolled_store_appends_to_the_highest_file() {
     assert_eq!(log_ids(dir.path()).expect("log_ids"), vec![0, 1]);
     assert_eq!(engine.get("gamma").expect("gamma"), "three");
     assert_eq!(engine.get("alpha").expect("alpha"), "one");
+}
+
+#[test]
+fn a_fresh_key_adds_no_dead_bytes() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut engine = Engine::open(dir.path()).expect("open");
+    engine.set("alpha".into(), "one".into()).expect("set");
+
+    assert_eq!(engine.stats.dead_bytes(), 0);
+    assert_eq!(
+        engine.stats.total_bytes(),
+        framed_len(&Command::Set {
+            key: "alpha".into(),
+            value: "one".into()
+        })
+    );
+}
+
+#[test]
+fn an_overwrite_marks_the_previous_record_dead() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut engine = Engine::open(dir.path()).expect("open");
+    let first = Command::Set {
+        key: "alpha".into(),
+        value: "one".into(),
+    };
+    engine.set("alpha".into(), "one".into()).expect("set");
+    engine.set("alpha".into(), "two".into()).expect("overwrite");
+
+    assert_eq!(engine.stats.dead_bytes(), framed_len(&first));
+}
+
+#[test]
+fn a_remove_marks_both_the_record_and_its_tombstone_dead() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut engine = Engine::open(dir.path()).expect("open");
+    let record = Command::Set {
+        key: "alpha".into(),
+        value: "one".into(),
+    };
+    let tombstone = Command::Remove {
+        key: "alpha".into(),
+    };
+
+    engine.set("alpha".into(), "one".into()).expect("set");
+    engine.remove("alpha").expect("remove");
+
+    assert_eq!(
+        engine.stats.dead_bytes(),
+        framed_len(&record) + framed_len(&tombstone)
+    );
+    assert_eq!(engine.stats.dead_bytes(), engine.stats.total_bytes());
+}
+
+#[test]
+fn a_failed_remove_changes_nothing() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut engine = Engine::open(dir.path()).expect("open");
+    assert!(matches!(
+        engine.remove("ghost"),
+        Err(EngineError::KeyNotFound)
+    ));
+    assert_eq!(engine.stats.total_bytes(), 0);
+    assert_eq!(engine.stats.dead_bytes(), 0);
+}
+
+#[test]
+fn reopening_a_store_recounts_total_bytes_from_the_files() {
+    let dir = TempDir::new().expect("tempdir");
+    {
+        let mut engine = Engine::open(dir.path()).expect("open");
+        engine.set("alpha".into(), "one".into()).expect("set");
+        engine.set("alpha".into(), "two".into()).expect("overwrite");
+        engine.sync().expect("sync");
+    }
+
+    let engine = Engine::open(dir.path()).expect("reopen");
+    let on_disk = std::fs::metadata(crate::layout::log_path(dir.path(), 0))
+        .expect("metadata")
+        .len();
+    assert_eq!(engine.stats.total_bytes(), on_disk);
+    assert_eq!(
+        engine.stats.dead_bytes(),
+        0,
+        "dead bytes are not persisted; replay starts the estimate
+  over"
+    );
 }

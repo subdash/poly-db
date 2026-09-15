@@ -5,6 +5,7 @@ use crate::{
     layout::log_path,
     record::{self, HEADER_LEN, MAX_KEY_BYTES, MAX_VALUE_BYTES},
     replay,
+    stats::Stats,
 };
 use std::{
     fs::{File, OpenOptions},
@@ -20,6 +21,7 @@ pub struct Engine {
     config: EngineConfig,
     data_directory_path: PathBuf,
     active_id: u32,
+    stats: Arc<Stats>,
 }
 
 impl Engine {
@@ -57,7 +59,6 @@ impl Engine {
             store: Arc::new(RwLock::new(replayed.store)),
         };
         let writer = BufWriter::new(file);
-
         let engine = Engine {
             data_directory_path: dir.to_path_buf(),
             writer,
@@ -65,6 +66,7 @@ impl Engine {
             config,
             reader,
             active_id: replayed.active_id,
+            stats: Arc::new(Stats::new(replayed.total_bytes)),
         };
 
         Ok(engine)
@@ -97,12 +99,19 @@ impl Engine {
         let entry = self.append(&cmd)?;
 
         // Write to key dir
-        self.reader
+        let displaced = self
+            .reader
             .store
             .write()
             .expect("store lock poisoned")
             .key_dir
             .insert(key, entry);
+
+        // `insert` above will return the old displaced entry if the new entry overwrites it.
+        // In that case we have dead bytes in the log (of the old entry), so we should record that.
+        if let Some(old) = displaced {
+            self.stats.record_dead(old.framed_len());
+        }
 
         Ok(())
     }
@@ -134,13 +143,20 @@ impl Engine {
         };
 
         // Append command to log
-        self.append(&cmd)?;
-        self.reader
+        let tombstone = self.append(&cmd)?;
+        let removed = self
+            .reader
             .store
             .write() // Obtain write lock to remove key from memory
             .expect("store lock poisoned")
             .key_dir
-            .remove(key);
+            .remove(key)
+            // Unreachable right now because only one thread holds &mut Engine. It only ever replaces
+            // entries, never removes them.
+            .expect("attempted to remove non-existent key");
+
+        self.stats
+            .record_dead(tombstone.framed_len() + removed.framed_len());
 
         Ok(())
     }
@@ -158,7 +174,8 @@ impl Engine {
 
         let record = record::encode(cmd)?;
         let record_len = record.len();
-        let payload_len = (record_len - HEADER_LEN) as u32;
+        let payload_len = u32::try_from(record_len - HEADER_LEN)
+            .expect("record_len - HEADER_LEN should not exceed u32");
 
         // Append the bytes, flush (buffer -> OS) and fsync (OS -> disk)
         // when policy instructs us to, update offset
@@ -171,6 +188,7 @@ impl Engine {
             FsyncPolicy::Never => {}
         }
         self.write_offset += record_len as u64;
+        self.stats.record_append(record_len as u64);
 
         let entry = Entry {
             file_id: self.active_id,

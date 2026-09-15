@@ -40,7 +40,7 @@ pub fn spawn_with(
         }
 
         if let Err(e) = engine.sync() {
-            tracing::error!(error = %e, "final sync failed")
+            tracing::error!(error = %e, "final sync failed");
         }
     })
 }

@@ -7,6 +7,7 @@ mod layout;
 mod reader;
 mod record;
 mod replay;
+mod stats;
 mod store;
 
 pub use command::Command;

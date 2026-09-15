@@ -19,7 +19,6 @@ pub(crate) struct Replayed {
     /// Where the next append to the active file belongs
     pub(crate) write_offset: u64,
     /// The summed length of every log file, for the merge trigger
-    #[allow(dead_code)]
     pub(crate) total_bytes: u64,
 }
 
@@ -91,7 +90,7 @@ fn replay_file(store: &mut Store, file: &File, id: u32) -> Result<u64> {
         }
 
         // Read payload
-        let payload_len = record::payload_len(&header);
+        let payload_len = record::payload_len(header);
 
         if payload_len as usize > MAX_PAYLOAD_BYTES {
             // Don't allocate more than the max allowed
@@ -125,9 +124,9 @@ fn replay_file(store: &mut Store, file: &File, id: u32) -> Result<u64> {
             Command::Remove { key } => {
                 store.key_dir.remove(&key);
             }
-        };
+        }
 
-        offset += HEADER_LEN as u64 + payload_len as u64;
+        offset += HEADER_LEN as u64 + u64::from(payload_len);
     }
 
     Ok(offset)

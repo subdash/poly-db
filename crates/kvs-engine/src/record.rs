@@ -13,7 +13,7 @@ pub(crate) fn encode(cmd: &Command) -> Result<Vec<u8>> {
     let payload = bincode::serde::encode_to_vec(cmd, bincode::config::standard())
         .map_err(|e| EngineError::Encode(e.to_string()))?;
     let crc = crc32fast::hash(&payload);
-    let len = payload.len() as u32;
+    let len = u32::try_from(payload.len()).expect("payload.len() exceeds u32");
 
     // Build byte buffer and return
     let mut buffer = Vec::with_capacity(HEADER_LEN + payload.len());
@@ -34,7 +34,7 @@ pub(crate) fn decode(buffer: &[u8], offset: u64) -> Result<Command> {
         .expect("length checked above");
 
     // Compare header-declared length to actual buffer length
-    if buffer.len() - HEADER_LEN != payload_len(&header) as usize {
+    if buffer.len() - HEADER_LEN != payload_len(header) as usize {
         return Err(EngineError::Corrupt { offset });
     }
 
@@ -42,7 +42,7 @@ pub(crate) fn decode(buffer: &[u8], offset: u64) -> Result<Command> {
     let payload_hash = crc32fast::hash(payload);
 
     // Make sure payload hash matches header CRC
-    if payload_hash != stored_crc(&header) {
+    if payload_hash != stored_crc(header) {
         return Err(EngineError::Corrupt { offset });
     }
 
@@ -52,7 +52,7 @@ pub(crate) fn decode(buffer: &[u8], offset: u64) -> Result<Command> {
     Ok(cmd)
 }
 
-fn stored_crc(header: &[u8; HEADER_LEN]) -> u32 {
+fn stored_crc(header: [u8; HEADER_LEN]) -> u32 {
     u32::from_le_bytes(
         header[..4]
             .try_into()
@@ -60,7 +60,7 @@ fn stored_crc(header: &[u8; HEADER_LEN]) -> u32 {
     )
 }
 
-pub(crate) fn payload_len(header: &[u8; HEADER_LEN]) -> u32 {
+pub(crate) fn payload_len(header: [u8; HEADER_LEN]) -> u32 {
     u32::from_le_bytes(
         header[4..8]
             .try_into()
@@ -100,7 +100,7 @@ mod tests {
     fn the_header_reports_the_payload_length() {
         let bytes = encode(&sample()).expect("encode");
         let header: [u8; HEADER_LEN] = bytes[..HEADER_LEN].try_into().expect("header");
-        assert_eq!(payload_len(&header) as usize, bytes.len() - HEADER_LEN);
+        assert_eq!(payload_len(header) as usize, bytes.len() - HEADER_LEN);
     }
 
     #[test]
